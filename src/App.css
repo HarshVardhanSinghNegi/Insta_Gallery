@@ -250,3 +250,17 @@ body{
   .profile-top h1{ font-size:17px; }
   .stats{ gap:18px; font-size:13px; }
 }
+
+.lightbox-nav{
+  position:absolute; top:50%; transform:translateY(-50%);
+  background:rgba(255,255,255,0.1); border:none; border-radius:50%;
+  width:44px; height:44px; display:flex; align-items:center; justify-content:center;
+  cursor:pointer; z-index:2;
+}
+.lightbox-nav:hover{ background:rgba(255,255,255,0.2); }
+.lightbox-nav.prev{ left:16px; }
+.lightbox-nav.next{ right:16px; }
+.lightbox-counter{ color:#a8a8a8; font-size:12.5px; margin-top:6px; }
+@media (max-width:700px){
+  .lightbox-nav{ display:none; }
+}

@@ -24,7 +24,7 @@ export default function App() {
   const [showLogin, setShowLogin] = useState(false)
   const [showAdd, setShowAdd] = useState(false)
   const [showEditProfile, setShowEditProfile] = useState(false)
-  const [active, setActive] = useState(null)
+  const [activeIndex, setActiveIndex] = useState(null)
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session))
@@ -116,7 +116,7 @@ export default function App() {
         {!loading && visibleItems.length > 0 && (
           <div className="post-grid">
             {visibleItems.map((item, i) => (
-              <PostThumb key={item.id} item={item} onOpen={() => setActive(item)} />
+              <PostThumb key={item.id} item={item} onOpen={() => setActiveIndex(item)} />
             ))}
           </div>
         )}
@@ -148,14 +148,15 @@ export default function App() {
           }}
         />
       )}
-      {active && (
+      {activeIndex !== null && (
         <Lightbox
-          item={active}
-          index={items.findIndex((i) => i.id === active.id)}
+          items={visibleItems}
+          index={activeIndex}
           isOwner={isOwner}
-          onClose={() => setActive(null)}
+          onClose={() => setActiveIndex(null)}
+          onNavigate={setActiveIndex}
           onDeleted={() => {
-            setActive(null)
+            setActiveIndex(null)
             loadAll()
           }}
         />
@@ -470,39 +471,75 @@ function AddModal({ onClose, onSaved }) {
   )
 }
 
-function Lightbox({ item, index, isOwner, onClose, onDeleted }) {
-  const [busy, setBusy] = useState(false)
+function Lightbox({ items, index, isOwner, onClose, onNavigate, onDeleted }) {
+  const item = items[index]
+  const touchStartX = useRef(null)
+
+  const goPrev = () => index > 0 && onNavigate(index - 1)
+  const goNext = () => index < items.length - 1 && onNavigate(index + 1)
 
   useEffect(() => {
     function onKey(e) {
       if (e.key === 'Escape') onClose()
+      if (e.key === 'ArrowLeft') goPrev()
+      if (e.key === 'ArrowRight') goNext()
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [onClose])
+  }, [index, items.length])
+
+  function handleTouchStart(e) {
+    touchStartX.current = e.touches[0].clientX
+  }
+  function handleTouchEnd(e) {
+    if (touchStartX.current === null) return
+    const deltaX = e.changedTouches[0].clientX - touchStartX.current
+    if (Math.abs(deltaX) > 50) {
+      if (deltaX > 0) goPrev()
+      else goNext()
+    }
+    touchStartX.current = null
+  }
+
+  if (!item) return null
 
   async function remove() {
     if (!confirm('Delete this post?')) return
-    setBusy(true)
     await supabase.storage.from(BUCKET).remove([item.storage_path])
     await supabase.from('media').delete().eq('id', item.id)
-    setBusy(false)
     onDeleted()
   }
 
   return (
     <div className="lightbox" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <button className="lightbox-close" onClick={onClose}>Close ✕</button>
-      <div className="lightbox-inner">
+
+      {index > 0 && (
+        <button className="lightbox-nav prev" onClick={goPrev} aria-label="Previous">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="white"><path d="M15.5 19L8.5 12l7-7" stroke="white" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round"/></svg>
+        </button>
+      )}
+      {index < items.length - 1 && (
+        <button className="lightbox-nav next" onClick={goNext} aria-label="Next">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="white"><path d="M8.5 5l7 7-7 7" stroke="white" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round"/></svg>
+        </button>
+      )}
+
+      <div
+        className="lightbox-inner"
+        onTouchStart={handleTouchStart}
+        onTouchEnd={handleTouchEnd}
+      >
         {item.type === 'video' ? (
-          <video src={item.url} controls autoPlay />
+          <video src={item.url} controls autoPlay key={item.id} />
         ) : (
-          <img src={item.url} alt={item.title || 'Post'} />
+          <img src={item.url} alt={item.title || 'Post'} key={item.id} />
         )}
         {item.title && <p className="lightbox-caption">{item.title}</p>}
+        <p className="lightbox-counter">{index + 1} / {items.length}</p>
         {isOwner && (
-          <button className="lightbox-delete" onClick={remove} disabled={busy}>
-            {busy ? 'Deleting…' : 'Delete post'}
+          <button className="lightbox-delete" onClick={remove}>
+            Delete post
           </button>
         )}
       </div>
