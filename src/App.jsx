@@ -327,56 +327,69 @@ function EditProfileModal({ profile, onClose, onSaved }) {
 }
 
 function AddModal({ onClose, onSaved }) {
-  const [file, setFile] = useState(null)
-  const [preview, setPreview] = useState(null)
-  const [fileType, setFileType] = useState(null)
-  const [title, setTitle] = useState('')
+  const [queue, setQueue] = useState([]) // [{ id, file, preview, type, title }]
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [progress, setProgress] = useState('')
   const inputRef = useRef(null)
 
-  async function handleFile(f) {
-    if (!f) return
-    const isVideo = f.type.startsWith('video/')
-    const isImage = f.type.startsWith('image/')
-    if (!isVideo && !isImage) return
+  async function handleFiles(fileList) {
+    const files = Array.from(fileList || [])
+    for (const f of files) {
+      const isVideo = f.type.startsWith('video/')
+      const isImage = f.type.startsWith('image/')
+      if (!isVideo && !isImage) continue
 
-    if (isImage) {
-      setProgress('Compressing…')
-      const compressed = await compressImage(f)
-      setFile(compressed)
-      setPreview(URL.createObjectURL(compressed))
-      setFileType('image')
-      setProgress('')
-    } else {
-      setFile(f)
-      setPreview(URL.createObjectURL(f))
-      setFileType('video')
+      const id = Date.now() + '_' + Math.random().toString(36).slice(2, 8)
+
+      if (isImage) {
+        const compressed = await compressImage(f)
+        setQueue((q) => [
+          ...q,
+          { id, file: compressed, preview: URL.createObjectURL(compressed), type: 'image', title: '' },
+        ])
+      } else {
+        setQueue((q) => [
+          ...q,
+          { id, file: f, preview: URL.createObjectURL(f), type: 'video', title: '' },
+        ])
+      }
     }
   }
 
+  function removeItem(id) {
+    setQueue((q) => q.filter((item) => item.id !== id))
+  }
+
+  function updateCaption(id, title) {
+    setQueue((q) => q.map((item) => (item.id === id ? { ...item, title } : item)))
+  }
+
   async function save() {
-    if (!file) return
+    if (queue.length === 0) return
     setBusy(true)
     setError('')
     try {
-      const ext = fileType === 'video' ? file.name.split('.').pop() : 'jpg'
-      const path = `media/${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`
+      for (let i = 0; i < queue.length; i++) {
+        const item = queue[i]
+        setProgress(`Uploading ${i + 1} of ${queue.length}…`)
 
-      setProgress('Uploading…')
-      const { error: upErr } = await supabase.storage.from(BUCKET).upload(path, file)
-      if (upErr) throw upErr
+        const ext = item.type === 'video' ? item.file.name.split('.').pop() : 'jpg'
+        const path = `media/${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`
 
-      const { data: pub } = supabase.storage.from(BUCKET).getPublicUrl(path)
+        const { error: upErr } = await supabase.storage.from(BUCKET).upload(path, item.file)
+        if (upErr) throw upErr
 
-      const { error: dbErr } = await supabase.from('media').insert({
-        title: title.trim(),
-        type: fileType,
-        url: pub.publicUrl,
-        storage_path: path,
-      })
-      if (dbErr) throw dbErr
+        const { data: pub } = supabase.storage.from(BUCKET).getPublicUrl(path)
+
+        const { error: dbErr } = await supabase.from('media').insert({
+          title: item.title.trim(),
+          type: item.type,
+          url: pub.publicUrl,
+          storage_path: path,
+        })
+        if (dbErr) throw dbErr
+      }
 
       onSaved()
     } catch (e) {
@@ -391,48 +404,65 @@ function AddModal({ onClose, onSaved }) {
     <div className="overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="modal">
         <button className="close-x" onClick={onClose}>×</button>
-        <h2>New post</h2>
+        <h2>New post{queue.length > 1 ? `s (${queue.length})` : ''}</h2>
 
         <div className="field">
           <div
-            className={`dropzone ${preview ? 'has-img' : ''}`}
+            className="dropzone"
             onClick={() => inputRef.current.click()}
             onDragOver={(e) => e.preventDefault()}
             onDrop={(e) => {
               e.preventDefault()
-              handleFile(e.dataTransfer.files[0])
+              handleFiles(e.dataTransfer.files)
             }}
           >
-            {preview ? (
-              fileType === 'video' ? (
-                <video src={preview} controls />
-              ) : (
-                <img src={preview} alt="Preview" />
-              )
-            ) : (
-              <span>Click to choose a photo or video, or drag one here</span>
-            )}
+            <span>Click to choose photos or videos, or drag them here</span>
             <input
               ref={inputRef}
               type="file"
               accept="image/*,video/*"
-              onChange={(e) => handleFile(e.target.files[0])}
+              multiple
+              onChange={(e) => {
+                handleFiles(e.target.files)
+                e.target.value = ''
+              }}
             />
           </div>
         </div>
 
-        <div className="field">
-          <label>Caption</label>
-          <input type="text" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Write a caption…" />
-        </div>
+        {queue.length > 0 && (
+          <div className="queue-list">
+            {queue.map((item) => (
+              <div className="queue-item" key={item.id}>
+                <div className="queue-thumb">
+                  {item.type === 'video' ? (
+                    <video src={item.preview} muted />
+                  ) : (
+                    <img src={item.preview} alt="Preview" />
+                  )}
+                </div>
+                <input
+                  type="text"
+                  className="queue-caption"
+                  placeholder="Write a caption…"
+                  value={item.title}
+                  onChange={(e) => updateCaption(item.id, e.target.value)}
+                />
+                <button className="queue-remove" onClick={() => removeItem(item.id)} aria-label="Remove">
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
 
         {progress && <p className="progress-text">{progress}</p>}
         {error && <p className="error">{error}</p>}
 
         <div className="modal-actions">
           <button className="btn ghost" onClick={onClose}>Cancel</button>
-          <button className="btn primary" disabled={!file || busy} onClick={save}>
-            {busy ? 'Posting…' : 'Share'}
+          <button className="btn primary" disabled={queue.length === 0 || busy} onClick={save}>
+            {busy ? 'Posting…' : queue.length > 1 ? `Share ${queue.length} posts` : 'Share'}
           </button>
         </div>
       </div>
