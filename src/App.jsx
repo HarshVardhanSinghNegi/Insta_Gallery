@@ -116,7 +116,7 @@ export default function App() {
         {!loading && visibleItems.length > 0 && (
           <div className="post-grid">
             {visibleItems.map((item, i) => (
-              <PostThumb key={item.id} item={item} onOpen={() => setActiveIndex(item)} />
+              <PostThumb key={item.id} item={item} onOpen={() => setActiveIndex(i)} />
             ))}
           </div>
         )}
