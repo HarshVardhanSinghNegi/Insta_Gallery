@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import JSZip from 'jszip'
 import { supabase } from './supabaseClient'
 import { compressImage } from './utils/compressImage'
 import AdSlot from './AdSlot'
@@ -22,6 +23,38 @@ function getVoterId() {
 }
 const VOTER_ID = getVoterId()
 
+function sanitizeFilename(name) {
+  return (name || '')
+    .trim()
+    .replace(/[^a-z0-9\-_ ]/gi, '')
+    .replace(/\s+/g, '-')
+    .slice(0, 60)
+}
+
+function extensionFor(item) {
+  const fromPath = item.storage_path?.split('.').pop()
+  if (fromPath) return fromPath
+  return item.type === 'video' ? 'mp4' : 'jpg'
+}
+
+function triggerBlobDownload(blob, filename) {
+  const blobUrl = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = blobUrl
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(blobUrl)
+}
+
+async function downloadSingle(item, index = 0) {
+  const res = await fetch(item.url)
+  const blob = await res.blob()
+  const base = sanitizeFilename(item.title) || `${item.type}-${index + 1}`
+  triggerBlobDownload(blob, `${base}.${extensionFor(item)}`)
+}
+
 export default function App() {
   const [session, setSession] = useState(null)
   const [profile, setProfile] = useState({
@@ -42,9 +75,12 @@ export default function App() {
   const [showLogin, setShowLogin] = useState(false)
   const [showAdd, setShowAdd] = useState(false)
   const [showEditProfile, setShowEditProfile] = useState(false)
+  const [showAvatarViewer, setShowAvatarViewer] = useState(false)
   const [activeIndex, setActiveIndex] = useState(null)
   const [selectMode, setSelectMode] = useState(false)
   const [selectedIds, setSelectedIds] = useState(new Set())
+  const [bulkBusy, setBulkBusy] = useState(false)
+  const [bulkProgress, setBulkProgress] = useState('')
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session))
@@ -86,7 +122,6 @@ export default function App() {
 
   async function vote(mediaId, type) {
     const current = myVotes[mediaId]
-    // Optimistic local update so it feels instant
     setMyVotes((prev) => {
       const next = { ...prev }
       if (current === type) delete next[mediaId]
@@ -136,6 +171,39 @@ export default function App() {
     loadAll()
   }
 
+  async function bulkDownload() {
+    if (selectedIds.size === 0) return
+    const toDownload = items.filter((i) => selectedIds.has(i.id))
+    setBulkBusy(true)
+    try {
+      if (toDownload.length === 1) {
+        setBulkProgress('Downloading…')
+        await downloadSingle(toDownload[0])
+      } else {
+        // Zip whenever more than one file is selected — browsers block or
+        // prompt for permission when several separate downloads fire at
+        // once, so a single zip is the reliable path for any multi-select.
+        const zip = new JSZip()
+        for (let i = 0; i < toDownload.length; i++) {
+          setBulkProgress(`Preparing ${i + 1} of ${toDownload.length}…`)
+          const item = toDownload[i]
+          const res = await fetch(item.url)
+          const blob = await res.blob()
+          const base = sanitizeFilename(item.title) || `${item.type}-${i + 1}`
+          zip.file(`${base}-${i + 1}.${extensionFor(item)}`, blob)
+        }
+        setBulkProgress('Zipping…')
+        const content = await zip.generateAsync({ type: 'blob' })
+        triggerBlobDownload(content, `gallery-${Date.now()}.zip`)
+      }
+    } catch (e) {
+      alert('Download failed: ' + e.message)
+    } finally {
+      setBulkBusy(false)
+      setBulkProgress('')
+    }
+  }
+
   const isOwner = !!session
   const photoCount = items.filter((i) => i.type === 'image').length
   const videoCount = items.filter((i) => i.type === 'video').length
@@ -157,11 +225,13 @@ export default function App() {
 
       <main className="content">
         <header className="profile-header">
-          <img
-            className="avatar"
-            src={profile.avatar_url || DEFAULT_AVATAR}
-            alt={profile.display_name}
-          />
+          <button
+            className="avatar-btn"
+            onClick={() => setShowAvatarViewer(true)}
+            aria-label="View profile picture"
+          >
+            <img className="avatar" src={profile.avatar_url || DEFAULT_AVATAR} alt={profile.display_name} />
+          </button>
           <div className="profile-info">
             <div className="profile-top">
               <h1>{profile.display_name}</h1>
@@ -203,7 +273,14 @@ export default function App() {
                     >
                       Cancel
                     </button>
-                    <button className="btn danger small" disabled={selectedIds.size === 0} onClick={bulkDelete}>
+                    <button
+                      className="btn ghost small"
+                      disabled={selectedIds.size === 0 || bulkBusy}
+                      onClick={bulkDownload}
+                    >
+                      {bulkBusy ? bulkProgress || 'Working…' : `Download ${selectedIds.size > 0 ? `(${selectedIds.size})` : ''}`}
+                    </button>
+                    <button className="btn danger small" disabled={selectedIds.size === 0 || bulkBusy} onClick={bulkDelete}>
                       Delete {selectedIds.size > 0 ? `(${selectedIds.size})` : ''}
                     </button>
                   </>
@@ -306,6 +383,15 @@ export default function App() {
             setProfile(p)
             setShowEditProfile(false)
           }}
+        />
+      )}
+      {showAvatarViewer && (
+        <AvatarViewer
+          avatarUrl={profile.avatar_url || DEFAULT_AVATAR}
+          displayName={profile.display_name}
+          isOwner={isOwner}
+          hasCustomAvatar={!!profile.avatar_url}
+          onClose={() => setShowAvatarViewer(false)}
         />
       )}
       {activeIndex !== null && (
@@ -650,7 +736,47 @@ function AddModal({ onClose, onSaved }) {
   )
 }
 
+function AvatarViewer({ avatarUrl, displayName, isOwner, hasCustomAvatar, onClose }) {
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    function onKey(e) {
+      if (e.key === 'Escape') onClose()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  async function download() {
+    setBusy(true)
+    try {
+      const res = await fetch(avatarUrl)
+      const blob = await res.blob()
+      triggerBlobDownload(blob, 'profile-picture.jpg')
+    } catch (e) {
+      alert('Download failed: ' + e.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="lightbox" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <button className="lightbox-close" onClick={onClose}>Close ✕</button>
+      <div className="lightbox-inner">
+        <img src={avatarUrl} alt={displayName} className="avatar-large" />
+        {isOwner && hasCustomAvatar && (
+          <button className="lightbox-download" onClick={download} disabled={busy}>
+            {busy ? 'Downloading…' : 'Download'}
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function Lightbox({ items, index, isOwner, counts, myVotes, onVote, onClose, onNavigate, onDeleted }) {
+  const [busy, setBusy] = useState(false)
   const item = items[index]
   const touchStartX = useRef(null)
 
@@ -690,6 +816,17 @@ function Lightbox({ items, index, isOwner, counts, myVotes, onVote, onClose, onN
     await supabase.storage.from(BUCKET).remove([item.storage_path])
     await supabase.from('media').delete().eq('id', item.id)
     onDeleted()
+  }
+
+  async function download() {
+    setBusy(true)
+    try {
+      await downloadSingle(item, index)
+    } catch (e) {
+      alert('Download failed: ' + e.message)
+    } finally {
+      setBusy(false)
+    }
   }
 
   return (
@@ -733,11 +870,19 @@ function Lightbox({ items, index, isOwner, counts, myVotes, onVote, onClose, onN
         </div>
 
         <p className="lightbox-counter">{index + 1} / {items.length}</p>
-        {isOwner && (
-          <button className="lightbox-delete" onClick={remove}>
-            Delete post
-          </button>
-        )}
+
+        <div className="lightbox-owner-actions">
+          {isOwner && (
+            <button className="lightbox-download" onClick={download} disabled={busy}>
+              {busy ? 'Downloading…' : 'Download'}
+            </button>
+          )}
+          {isOwner && (
+            <button className="lightbox-delete" onClick={remove}>
+              Delete post
+            </button>
+          )}
+        </div>
       </div>
     </div>
   )
