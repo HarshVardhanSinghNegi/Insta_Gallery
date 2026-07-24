@@ -25,6 +25,8 @@ export default function App() {
   const [showAdd, setShowAdd] = useState(false)
   const [showEditProfile, setShowEditProfile] = useState(false)
   const [activeIndex, setActiveIndex] = useState(null)
+  const [selectMode, setSelectMode] = useState(false)
+  const [selectedIds, setSelectedIds] = useState(new Set())
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session))
@@ -42,6 +44,27 @@ export default function App() {
     setItems(mediaData || [])
     if (profileData) setProfile(profileData)
     setLoading(false)
+  }
+
+  function toggleSelect(id) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  async function bulkDelete() {
+    if (selectedIds.size === 0) return
+    if (!confirm(`Delete ${selectedIds.size} post(s)? This can't be undone.`)) return
+    const toDelete = items.filter((i) => selectedIds.has(i.id))
+    const paths = toDelete.map((i) => i.storage_path)
+    await supabase.storage.from(BUCKET).remove(paths)
+    await supabase.from('media').delete().in('id', Array.from(selectedIds))
+    setSelectedIds(new Set())
+    setSelectMode(false)
+    loadAll()
   }
 
   const isOwner = !!session
@@ -65,13 +88,36 @@ export default function App() {
             <div className="profile-top">
               <h1>{profile.display_name}</h1>
               <div className="profile-actions">
-                {isOwner && (
+                {isOwner && !selectMode && (
                   <>
                     <button className="btn ghost small" onClick={() => setShowEditProfile(true)}>
                       Edit profile
                     </button>
+                    <button className="btn ghost small" onClick={() => setSelectMode(true)}>
+                      Select
+                    </button>
                     <button className="btn primary small" onClick={() => setShowAdd(true)}>
                       + New post
+                    </button>
+                  </>
+                )}
+                {isOwner && selectMode && (
+                  <>
+                    <button
+                      className="btn ghost small"
+                      onClick={() => {
+                        setSelectMode(false)
+                        setSelectedIds(new Set())
+                      }}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      className="btn danger small"
+                      disabled={selectedIds.size === 0}
+                      onClick={bulkDelete}
+                    >
+                      Delete {selectedIds.size > 0 ? `(${selectedIds.size})` : ''}
                     </button>
                   </>
                 )}
@@ -116,7 +162,15 @@ export default function App() {
         {!loading && visibleItems.length > 0 && (
           <div className="post-grid">
             {visibleItems.map((item, i) => (
-              <PostThumb key={item.id} item={item} onOpen={() => setActiveIndex(i)} />
+              <PostThumb
+                key={item.id}
+                item={item}
+                index={i}
+                selectMode={selectMode}
+                selected={selectedIds.has(item.id)}
+                onToggleSelect={() => toggleSelect(item.id)}
+                onOpen={() => setActiveIndex(i)}
+              />
             ))}
           </div>
         )}
@@ -175,17 +229,33 @@ function AdRail({ side }) {
   )
 }
 
-function PostThumb({ item, onOpen }) {
+function PostThumb({ item, onOpen, selectMode, selected, onToggleSelect }) {
+  function handleClick() {
+    if (selectMode) onToggleSelect()
+    else onOpen()
+  }
   return (
-    <div className="post-thumb" onClick={onOpen} tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && onOpen()}>
+    <div
+      className={`post-thumb ${selected ? 'selected' : ''}`}
+      onClick={handleClick}
+      tabIndex={0}
+      onKeyDown={(e) => e.key === 'Enter' && handleClick()}
+    >
       {item.type === 'video' ? (
         <video src={item.url} muted playsInline />
       ) : (
         <img src={item.url} alt={item.title || 'Post'} loading="lazy" />
       )}
-      {item.type === 'video' && (
+      {item.type === 'video' && !selectMode && (
         <span className="video-icon">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="white"><path d="M8 5v14l11-7z" /></svg>
+        </span>
+      )}
+      {selectMode && (
+        <span className={`thumb-checkbox ${selected ? 'checked' : ''}`}>
+          {selected && (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3"><path d="M5 13l4 4L19 7" /></svg>
+          )}
         </span>
       )}
     </div>
@@ -516,12 +586,12 @@ function Lightbox({ items, index, isOwner, onClose, onNavigate, onDeleted }) {
 
       {index > 0 && (
         <button className="lightbox-nav prev" onClick={goPrev} aria-label="Previous">
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="white"><path d="M15.5 19L8.5 12l7-7" stroke="white" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round"/></svg>
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="white"><path d="M15.5 19L8.5 12l7-7" stroke="white" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" /></svg>
         </button>
       )}
       {index < items.length - 1 && (
         <button className="lightbox-nav next" onClick={goNext} aria-label="Next">
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="white"><path d="M8.5 5l7 7-7 7" stroke="white" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round"/></svg>
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="white"><path d="M8.5 5l7 7-7 7" stroke="white" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" /></svg>
         </button>
       )}
 

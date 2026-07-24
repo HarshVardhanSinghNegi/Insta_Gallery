@@ -264,3 +264,17 @@ body{
 @media (max-width:700px){
   .lightbox-nav{ display:none; }
 }
+
+.btn.danger{ background:var(--danger); color:#fff; }
+.btn.danger:hover{ background:#d5303f; }
+.btn.danger:disabled{ opacity:0.4; cursor:not-allowed; }
+
+.post-thumb.selected{ outline:3px solid var(--blue); outline-offset:-3px; }
+.thumb-checkbox{
+  position:absolute; top:8px; right:8px;
+  width:22px; height:22px; border-radius:50%;
+  background:rgba(0,0,0,0.35);
+  border:2px solid #fff;
+  display:flex; align-items:center; justify-content:center;
+}
+.thumb-checkbox.checked{ background:var(--blue); border-color:var(--blue); }
