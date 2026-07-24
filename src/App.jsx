@@ -10,6 +10,18 @@ const DEFAULT_AVATAR =
     `<svg xmlns="http://www.w3.org/2000/svg" width="150" height="150"><rect width="150" height="150" fill="%23e8e8e8"/><circle cx="75" cy="58" r="28" fill="%23bbb"/><ellipse cx="75" cy="140" rx="48" ry="38" fill="%23bbb"/></svg>`
   )
 
+// A random per-browser ID so anonymous viewers can like/dislike without
+// an account, while still only getting one vote per post each.
+function getVoterId() {
+  let id = localStorage.getItem('gallery_voter_id')
+  if (!id) {
+    id = crypto.randomUUID()
+    localStorage.setItem('gallery_voter_id', id)
+  }
+  return id
+}
+const VOTER_ID = getVoterId()
+
 export default function App() {
   const [session, setSession] = useState(null)
   const [profile, setProfile] = useState({
@@ -20,6 +32,12 @@ export default function App() {
   const [items, setItems] = useState([])
   const [loading, setLoading] = useState(true)
   const [filter, setFilter] = useState('all') // all | image | video
+  const [sortMode, setSortMode] = useState('none') // none | liked | disliked
+
+  const [reactionCounts, setReactionCounts] = useState({}) // { [mediaId]: { likes, dislikes } }
+  const [myVotes, setMyVotes] = useState({}) // { [mediaId]: 'like' | 'dislike' }
+
+  const [dark, setDark] = useState(() => localStorage.getItem('gallery_dark') === '1')
 
   const [showLogin, setShowLogin] = useState(false)
   const [showAdd, setShowAdd] = useState(false)
@@ -35,6 +53,11 @@ export default function App() {
     return () => sub.subscription.unsubscribe()
   }, [])
 
+  useEffect(() => {
+    document.body.classList.toggle('dark', dark)
+    localStorage.setItem('gallery_dark', dark ? '1' : '0')
+  }, [dark])
+
   async function loadAll() {
     setLoading(true)
     const [{ data: mediaData }, { data: profileData }] = await Promise.all([
@@ -43,7 +66,53 @@ export default function App() {
     ])
     setItems(mediaData || [])
     if (profileData) setProfile(profileData)
+    await loadReactions()
     setLoading(false)
+  }
+
+  async function loadReactions() {
+    const { data } = await supabase.from('reactions').select('media_id, type, voter_id')
+    const counts = {}
+    const mine = {}
+    ;(data || []).forEach((r) => {
+      if (!counts[r.media_id]) counts[r.media_id] = { likes: 0, dislikes: 0 }
+      if (r.type === 'like') counts[r.media_id].likes++
+      else counts[r.media_id].dislikes++
+      if (r.voter_id === VOTER_ID) mine[r.media_id] = r.type
+    })
+    setReactionCounts(counts)
+    setMyVotes(mine)
+  }
+
+  async function vote(mediaId, type) {
+    const current = myVotes[mediaId]
+    // Optimistic local update so it feels instant
+    setMyVotes((prev) => {
+      const next = { ...prev }
+      if (current === type) delete next[mediaId]
+      else next[mediaId] = type
+      return next
+    })
+    setReactionCounts((prev) => {
+      const next = { ...prev }
+      const c = { ...(next[mediaId] || { likes: 0, dislikes: 0 }) }
+      if (current === 'like') c.likes = Math.max(0, c.likes - 1)
+      if (current === 'dislike') c.dislikes = Math.max(0, c.dislikes - 1)
+      if (current !== type) {
+        if (type === 'like') c.likes++
+        else c.dislikes++
+      }
+      next[mediaId] = c
+      return next
+    })
+
+    if (current === type) {
+      await supabase.from('reactions').delete().eq('media_id', mediaId).eq('voter_id', VOTER_ID)
+    } else {
+      await supabase
+        .from('reactions')
+        .upsert({ media_id: mediaId, voter_id: VOTER_ID, type }, { onConflict: 'media_id,voter_id' })
+    }
   }
 
   function toggleSelect(id) {
@@ -68,10 +137,19 @@ export default function App() {
   }
 
   const isOwner = !!session
-  const visibleItems =
-    filter === 'all' ? items : items.filter((i) => i.type === filter)
   const photoCount = items.filter((i) => i.type === 'image').length
   const videoCount = items.filter((i) => i.type === 'video').length
+
+  let visibleItems = filter === 'all' ? items : items.filter((i) => i.type === filter)
+  if (sortMode === 'liked') {
+    visibleItems = [...visibleItems].sort(
+      (a, b) => (reactionCounts[b.id]?.likes || 0) - (reactionCounts[a.id]?.likes || 0)
+    )
+  } else if (sortMode === 'disliked') {
+    visibleItems = [...visibleItems].sort(
+      (a, b) => (reactionCounts[b.id]?.dislikes || 0) - (reactionCounts[a.id]?.dislikes || 0)
+    )
+  }
 
   return (
     <div className="page">
@@ -88,6 +166,19 @@ export default function App() {
             <div className="profile-top">
               <h1>{profile.display_name}</h1>
               <div className="profile-actions">
+                <button
+                  className="icon-btn"
+                  onClick={() => setDark((d) => !d)}
+                  aria-label="Toggle dark mode"
+                  title="Toggle dark mode"
+                >
+                  {dark ? (
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="5" /><path d="M12 1v2M12 21v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M1 12h2M21 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4" /></svg>
+                  ) : (
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z" /></svg>
+                  )}
+                </button>
+
                 {isOwner && !selectMode && (
                   <>
                     <button className="btn ghost small" onClick={() => setShowEditProfile(true)}>
@@ -112,11 +203,7 @@ export default function App() {
                     >
                       Cancel
                     </button>
-                    <button
-                      className="btn danger small"
-                      disabled={selectedIds.size === 0}
-                      onClick={bulkDelete}
-                    >
+                    <button className="btn danger small" disabled={selectedIds.size === 0} onClick={bulkDelete}>
                       Delete {selectedIds.size > 0 ? `(${selectedIds.size})` : ''}
                     </button>
                   </>
@@ -150,6 +237,26 @@ export default function App() {
           </button>
         </div>
 
+        <div className="sort-row">
+          <span className="sort-label">Sort:</span>
+          <label className="checkbox-label">
+            <input
+              type="checkbox"
+              checked={sortMode === 'liked'}
+              onChange={() => setSortMode(sortMode === 'liked' ? 'none' : 'liked')}
+            />
+            Most liked
+          </label>
+          <label className="checkbox-label">
+            <input
+              type="checkbox"
+              checked={sortMode === 'disliked'}
+              onChange={() => setSortMode(sortMode === 'disliked' ? 'none' : 'disliked')}
+            />
+            Most disliked
+          </label>
+        </div>
+
         {loading && <div className="loading">Loading…</div>}
 
         {!loading && visibleItems.length === 0 && (
@@ -165,7 +272,6 @@ export default function App() {
               <PostThumb
                 key={item.id}
                 item={item}
-                index={i}
                 selectMode={selectMode}
                 selected={selectedIds.has(item.id)}
                 onToggleSelect={() => toggleSelect(item.id)}
@@ -207,6 +313,9 @@ export default function App() {
           items={visibleItems}
           index={activeIndex}
           isOwner={isOwner}
+          counts={reactionCounts}
+          myVotes={myVotes}
+          onVote={vote}
           onClose={() => setActiveIndex(null)}
           onNavigate={setActiveIndex}
           onDeleted={() => {
@@ -541,7 +650,7 @@ function AddModal({ onClose, onSaved }) {
   )
 }
 
-function Lightbox({ items, index, isOwner, onClose, onNavigate, onDeleted }) {
+function Lightbox({ items, index, isOwner, counts, myVotes, onVote, onClose, onNavigate, onDeleted }) {
   const item = items[index]
   const touchStartX = useRef(null)
 
@@ -573,6 +682,9 @@ function Lightbox({ items, index, isOwner, onClose, onNavigate, onDeleted }) {
 
   if (!item) return null
 
+  const itemCounts = counts[item.id] || { likes: 0, dislikes: 0 }
+  const myVote = myVotes[item.id]
+
   async function remove() {
     if (!confirm('Delete this post?')) return
     await supabase.storage.from(BUCKET).remove([item.storage_path])
@@ -586,26 +698,40 @@ function Lightbox({ items, index, isOwner, onClose, onNavigate, onDeleted }) {
 
       {index > 0 && (
         <button className="lightbox-nav prev" onClick={goPrev} aria-label="Previous">
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="white"><path d="M15.5 19L8.5 12l7-7" stroke="white" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" /></svg>
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none"><path d="M15.5 19L8.5 12l7-7" stroke="white" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round"/></svg>
         </button>
       )}
       {index < items.length - 1 && (
         <button className="lightbox-nav next" onClick={goNext} aria-label="Next">
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="white"><path d="M8.5 5l7 7-7 7" stroke="white" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" /></svg>
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none"><path d="M8.5 5l7 7-7 7" stroke="white" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round"/></svg>
         </button>
       )}
 
-      <div
-        className="lightbox-inner"
-        onTouchStart={handleTouchStart}
-        onTouchEnd={handleTouchEnd}
-      >
+      <div className="lightbox-inner" onTouchStart={handleTouchStart} onTouchEnd={handleTouchEnd}>
         {item.type === 'video' ? (
           <video src={item.url} controls autoPlay key={item.id} />
         ) : (
           <img src={item.url} alt={item.title || 'Post'} key={item.id} />
         )}
         {item.title && <p className="lightbox-caption">{item.title}</p>}
+
+        <div className="reaction-row">
+          <button
+            className={`reaction-btn ${myVote === 'like' ? 'active-like' : ''}`}
+            onClick={() => onVote(item.id, 'like')}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill={myVote === 'like' ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2"><path d="M7 22V11M2 13v7a2 2 0 002 2h13a2 2 0 002-1.7l1.2-8A2 2 0 0018.2 10H14V5a2 2 0 00-2-2 1 1 0 00-1 1v2a5 5 0 01-1.5 3.5L7 12" /></svg>
+            <span>{itemCounts.likes}</span>
+          </button>
+          <button
+            className={`reaction-btn ${myVote === 'dislike' ? 'active-dislike' : ''}`}
+            onClick={() => onVote(item.id, 'dislike')}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill={myVote === 'dislike' ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2"><path d="M17 2v11M22 11V4a2 2 0 00-2-2H7a2 2 0 00-2 1.7l-1.2 8A2 2 0 005.8 14H10v5a2 2 0 002 2 1 1 0 001-1v-2a5 5 0 011.5-3.5L17 12" /></svg>
+            <span>{itemCounts.dislikes}</span>
+          </button>
+        </div>
+
         <p className="lightbox-counter">{index + 1} / {items.length}</p>
         {isOwner && (
           <button className="lightbox-delete" onClick={remove}>
